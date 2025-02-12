@@ -1,134 +1,139 @@
-
-import numpy as np
-import pandas as pd
-
+import math
 from typing import List
 from smoothing_classes import (
-    NoSmoothing, AddK, StupidBackoff, GoodTuring, Interpolation, KneserNey
+    NoSmoothing,
+    AddK,
+    StupidBackoff,
+    GoodTuring,
+    Interpolation,
+    KneserNey
 )
+import editdistance
 from config import error_correction
-import math
 
 class SpellingCorrector:
     def __init__(self):
         self.correction_config = error_correction
         self.internal_ngram_name = self.correction_config['internal_ngram_best_config']['method_name']
 
-        if self.internal_ngram_name == "NO_SMOOTH":
-            self.internal_ngram = NoSmoothing()
-        elif self.internal_ngram_name == "ADD_K":
-            self.internal_ngram = AddK()
-        elif self.internal_ngram_name == "STUPID_BACKOFF":
-            self.internal_ngram = StupidBackoff()
-        elif self.internal_ngram_name == "GOOD_TURING":
-            self.internal_ngram = GoodTuring()
-        elif self.internal_ngram_name == "INTERPOLATION":
-            self.internal_ngram = Interpolation()
-        elif self.internal_ngram_name == "KNESER_NEY":
-            self.internal_ngram = KneserNey()
-
-        # Update the chosen n-gram config
+        smoothing_methods = {
+            "NO_SMOOTH": NoSmoothing,
+            "ADD_K": AddK,
+            "STUPID_BACKOFF": StupidBackoff,
+            "GOOD_TURING": GoodTuring,
+            "INTERPOLATION": Interpolation,
+            "KNESER_NEY": KneserNey
+        }
+        
+        self.internal_ngram = smoothing_methods[self.internal_ngram_name]()
         self.internal_ngram.update_config(self.correction_config['internal_ngram_best_config'])
 
-        # You can store additional error-model configs here too
-        self.candidate_max_distance = self.correction_config.get("candidate_max_distance", 1)
+        # Candidate generation configuration
+        self.candidate_max_distance = self.correction_config.get("candidate_max_distance", 2)
 
     def fit(self, data: List[str]) -> None:
         """
-        Fit the spelling corrector to the training data (for LM).
+        Train the internal n-gram model on the provided text data.
         """
         processed_data = self.internal_ngram.prepare_data_for_fitting(data, use_fixed=True)
         self.internal_ngram.fit(processed_data)
 
     def correct(self, text_tokens: List[str]) -> List[str]:
         """
-        Correct each token in a list of tokens using a noisy-channel approach.
-        For demonstration, we'll do a minimal approach:
-          - If token is in vocab, keep it.
-          - Otherwise, generate candidates, pick best by
-            P_LM * error_model(prob).
+        Correct each token in a text by choosing the best alternative 
+        using n-gram probability and an error model.
         """
         corrected_tokens = []
         for idx, token in enumerate(text_tokens):
             if token in self.internal_ngram.vocab:
-                # Keep it if recognized
                 corrected_tokens.append(token)
             else:
-                # Generate candidates
                 candidates = self.generate_candidates(token)
-                # Score each candidate
-                best_cand = self.choose_best_candidate(text_tokens, idx, candidates)
-                corrected_tokens.append(best_cand)
+                best_candidate = self.choose_best_candidate(text_tokens, idx, candidates)
+                corrected_tokens.append(best_candidate)
         return corrected_tokens
 
     def generate_candidates(self, token: str) -> List[str]:
         """
-        Example: naive candidate generation by scanning vocab for small edit distance.
-        This can be replaced with an advanced approach.
+        Generate possible spelling corrections based on edit distance.
         """
-        # For simplicity, return everything in the vocab (which is expensive if vocab is large!)
-        # In practice, you'd filter by edit distance <= self.candidate_max_distance
-        all_vocab = list(self.internal_ngram.vocab)
-        return all_vocab
+        return [
+            word for word in self.internal_ngram.vocab 
+            if editdistance.eval(token, word) <= self.candidate_max_distance
+        ]
 
     def choose_best_candidate(self, text_tokens: List[str], idx: int, candidates: List[str]) -> str:
         """
-        Score each candidate, picking the best.
-        We approximate sentence probability by substituting the candidate for the token, 
-        then measuring local n-gram probability, or the entire sentence probability. 
-        If you have an explicit error model, incorporate that as well.
+        Select the best candidate word based on a combination of:
+        - **N-gram model probability**
+        - **Edit distance penalty (error model)**
         """
-        best_score = float('-inf')
-        best_cand = text_tokens[idx]  # fallback
+        if not candidates:
+            return text_tokens[idx]  # If no candidates, return the original token
 
-        for cand in candidates:
-            # Build a local context for n-gram
-            # For bigram, context = previous token
-            # For trigram, context = previous 2 tokens, etc.
-            # We can do a simpler approach: replace the token temporarily and measure perplexity
-            original_token = text_tokens[idx]
-            text_tokens[idx] = cand
+        best_score = float("-inf")
+        best_candidate = text_tokens[idx]
 
-            # Let's compute sum of log probabilities around that index only for speed
+        original_token = text_tokens[idx]
+        
+        for candidate in candidates:
+            text_tokens[idx] = candidate
             score = self.local_ngram_score(text_tokens, idx)
+            
+            # Error model: penalize by edit distance
+            error_penalty = -editdistance.eval(original_token, candidate)
 
-            # If we had an error model, e.g., log(P(typo|cand)), multiply or add that:
-            # score += math.log(self.error_model(token, cand))  # placeholder
+            total_score = score + error_penalty  # Combining LM probability and error penalty
+            if total_score > best_score:
+                best_score = total_score
+                best_candidate = candidate
 
-            if score > best_score:
-                best_score = score
-                best_cand = cand
-
-            # revert the token after scoring
-            text_tokens[idx] = original_token
-
-        return best_cand
+        text_tokens[idx] = original_token  # Restore original token
+        return best_candidate
 
     def local_ngram_score(self, tokens: List[str], idx: int) -> float:
         """
-        Compute log probability for n-grams that include the token at index idx.
-        This is more efficient than computing full sentence perplexity each time.
-        For example, if n=2 (bigram), we only look at (token_{idx-1}, token_{idx}).
-        If n=3, also look at (token_{idx-2}, token_{idx-1}, token_{idx}), etc.
+        Compute the local probability of a word in context using the n-gram model.
         """
-        log_prob = 0.0
         n = self.internal_ngram.n
+        log_prob = 0.0
 
-        # For each relevant n-gram around idx:
-        # For example, from (idx - n + 1) to idx, inclusive, if valid
         start = max(0, idx - n + 1)
-        end = idx + 1  # Because range is exclusive at the upper bound
+        end = min(idx + 1, len(tokens))
+
         for i in range(start, end):
-            # build ngram from tokens[i : i + n] if in range
             if i + n <= len(tokens):
                 ngram_tuple = tuple(tokens[i : i + n])
-                context = ngram_tuple[:-1] if n > 1 else ()
+                context_tuple = ngram_tuple[:-1] if n > 1 else ()
                 word = ngram_tuple[-1]
-                p = self.internal_ngram.ngram_probability(context, word)
+                p = self.internal_ngram.ngram_probability(context_tuple, word)
+                
                 if p > 0:
                     log_prob += math.log(p)
                 else:
-                    # If zero, it's often lethal for the candidate
-                    return float('-inf')
+                    return float("-inf")  # Prevents division errors
 
         return log_prob
+
+
+if __name__ == "__main__":
+    with open("data/train1.txt", "r") as f1, open("data/train2.txt", "r") as f2:
+        train_data_1 = f1.read().splitlines()
+        train_data_2 = f2.read().splitlines()
+    
+    train_data = train_data_1 + train_data_2
+
+    corrector = SpellingCorrector()
+    corrector.fit(train_data)
+
+    # Uncomment to run evaluation with test data
+    with open("data/misspelling_public.txt", "r") as f:
+        for line in f:
+            if "&&" in line:
+                correct_text, incorrect_text = line.split("&&")
+                incorrect_tokens = incorrect_text.strip().split()
+                predicted_tokens = corrector.correct(incorrect_tokens)
+                print("GT  :", correct_text.strip())
+                print("IN  :", incorrect_text.strip())
+                print("OUT :", " ".join(predicted_tokens))
+                print()
