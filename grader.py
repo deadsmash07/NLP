@@ -23,7 +23,6 @@ class Grader:
 
 
     def load_test_dataset(self, path: str = './data/misspelling_public.txt') -> None:
-
         with open(path, 'r') as file:
             lines = file.readlines()
         for line in lines:
@@ -34,9 +33,14 @@ class Grader:
             except:
                 pass
 
-        # print a sample
-        rid = np.random.randint(len(self.corrupt))
-        print(self.corrupt[rid], self.truth[rid])
+    def print_predictions(self) -> None:
+        for corrupt_text, truth_text in zip(self.corrupt, self.truth):
+            incorrect_tokens = corrupt_text.strip().split()
+            predicted_tokens = self.corrector.correct(incorrect_tokens)
+            print("GT  :", truth_text.strip())
+            print("IN  :", corrupt_text.strip())
+            print("OUT :", " ".join(predicted_tokens))
+            print()
 
     def load_training_datasets(self, paths: List[str] = ['./data/train1.txt', './data/train2.txt']) -> None:
         for file in paths:
@@ -52,7 +56,7 @@ class Grader:
     def grade(self, test_mode = False):
         print(f"Grading for {self.entry_number}")
         if test_mode:
-            sc = score_batch(self.truth, self.truth)
+            sc = score_batch(self.truth, self.corrupt)
             df = pd.DataFrame({'corrupt': self.corrupt, 'truth': self.truth, 'prediction': self.truth})
         else:
             predictions = self.corrector.correct(self.corrupt)
@@ -68,4 +72,5 @@ class Grader:
 
 if __name__ == "__main__":
     hallelujah = Grader()
-    hallelujah.grade(True)
+    hallelujah.grade(False)
+    # hallelujah.print_predictions()
