@@ -73,4 +73,4 @@ class Grader:
 if __name__ == "__main__":
     hallelujah = Grader()
     hallelujah.grade(False)
-    # hallelujah.print_predictions()
+    hallelujah.print_predictions()

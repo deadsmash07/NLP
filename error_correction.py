@@ -1,8 +1,10 @@
+# error_correction.py
 import math
 import re
+import nltk
+import os
 from typing import List, Set, Tuple
 
-import nltk
 from nltk.tokenize import word_tokenize
 
 # Import your smoothing classes and the config dictionary
@@ -84,12 +86,13 @@ class IsolatedSpellingCorrector:
         then longest common prefix),
       - has a Jaccard-based fallback if the wildcard search finds no candidates.
     """
-    def __init__(self, vocab: Set[str], k: int = 2, jaccard_threshold: float = 0.3):
+    def __init__(self, vocab: Set[str], k: int = 2, jaccard_threshold: float = 0.3, word_frequencies=None):
         self.vocab = set(vocab)
         self.k = k
         self.jaccard_threshold = jaccard_threshold
+        self.word_frequencies = word_frequencies if word_frequencies else {} 
         self._build_wildcard_indices()
-
+        
     def _build_wildcard_indices(self):
         """
         Precompute an index for replacement wildcards:
@@ -172,14 +175,23 @@ class IsolatedSpellingCorrector:
                     best_distance = dist
                     best_candidate = cand
                 elif dist == best_distance:
-                    # tie-break on first letter
-                    if cand[0] == word[0] and best_candidate and best_candidate[0] != word[0]:
+                # Step 1: Prefer words that start with the same letter
+                    if best_candidate and best_candidate[0] != word[0] and cand[0] == word[0]:
                         best_candidate = cand
-                    elif (cand[0] == word[0] and best_candidate and
-                          best_candidate[0] == word[0]):
-                        # tie-break on prefix length
-                        if common_prefix_length(word, cand) > common_prefix_length(word, best_candidate):
-                            best_candidate = cand
+                        continue  # Move to next candidate
+
+                    # Step 2: Prefer words of the same length as the original word
+                    if best_candidate and len(best_candidate) != len(word) and len(cand) == len(word):
+                        best_candidate = cand
+                        continue  # Move to next candidate
+
+                    # Step 3: Use word frequency as the final tie-breaker
+                    freq_cand = self.word_frequencies.get(cand, 0)
+                    freq_best = self.word_frequencies.get(best_candidate, 0)
+
+                    if freq_cand > freq_best:
+                        best_candidate = cand
+
             return best_candidate
 
         # 2) Fallback: Jaccard with same first letter
@@ -214,8 +226,12 @@ class SpellingCorrector:
     A combined approach that can do either:
       - purely isolated correction (if use_context=False),
       - or n-gram context-based re-ranking (if use_context=True).
+
+    We also incorporate a list of frequent English words (from a txt file)
+    into the isolated corrector's vocabulary, without including them in
+    the n-gram model (they are not actually part of training sentences).
     """
-    def __init__(self, use_context: bool = True):
+    def __init__(self, use_context: bool = True, freq_words_path: str = "./data/frequent_words.txt"):
         self.use_context = use_context
         self.correction_config = error_correction  # from config.py
         self.internal_ngram_name = self.correction_config["internal_ngram_best_config"]["method_name"]
@@ -245,26 +261,53 @@ class SpellingCorrector:
         self.alpha = self.correction_config.get("alpha", 1.0)
         self.beta  = self.correction_config.get("beta", 1.0)
 
+        # Path to frequent words file (one word per line)
+        self.freq_words_path = freq_words_path
+
     def fit(self, data: List[str]) -> None:
         """
         Fit the n-gram model on 'data' (list of strings), then
-        initialize the isolated corrector with the same vocab.
+        initialize the isolated corrector with the union of:
+          - n-gram vocab
+          - frequent English words loaded from a .txt file
         """
+        # 1) Prepare training data and fit n-gram
         processed_data = self.internal_ngram.prepare_data_for_fitting(
             data,
-            use_fixed=True  # minimal tokenization or up to you
+            use_fixed=True
         )
         self.internal_ngram.fit(processed_data)
 
-        # Build vocabulary from the n-gram model
+        # 2) Build the "true" vocabulary from the n-gram model
+# 2) Build the "true" vocabulary from the n-gram model
         self.vocab = self.internal_ngram.vocab
 
-        # Initialize the isolated corrector (with fallback logic)
+        # 3) Compute word frequencies from the training corpus + extra corpus
+        self.word_frequencies = {}
+        for sentence in processed_data:
+            for word in sentence:
+                self.word_frequencies[word] = self.word_frequencies.get(word, 0) + 1
+
+        # 4) Load frequent English words from external .txt file
+        freq_words = set()
+        if os.path.exists(self.freq_words_path):
+            with open(self.freq_words_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    w = line.strip()
+                    if w:
+                        freq_words.add(w.lower())
+
+        # 5) Combine vocab and frequent words
+        combined_vocab = self.vocab.union(freq_words)
+
+        # 6) Initialize the isolated corrector with word frequencies
         self.isolated_corrector = IsolatedSpellingCorrector(
-            vocab=self.vocab,
+            vocab=combined_vocab,
             k=2,
-            jaccard_threshold=0.3
+            jaccard_threshold=0.3,
+            word_frequencies=self.word_frequencies  # Pass word frequency dictionary
         )
+
 
     def correct_tokens(self, tokens: List[str]) -> List[str]:
         """
@@ -291,7 +334,7 @@ class SpellingCorrector:
             candidate_set = self.isolated_corrector._lookup_candidates(token_lower)
 
             # Also consider the possibility that the token itself is correct
-            if token_lower in self.vocab:
+            if token_lower in self.isolated_corrector.vocab:
                 candidate_set.add(token_lower)
 
             # If still no candidates, fallback to isolated correct_word_isolated

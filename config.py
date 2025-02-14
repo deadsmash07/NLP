@@ -1,3 +1,4 @@
+
 # config.py
 
 # 1) NO SMOOTH
@@ -32,7 +33,7 @@ good_turing = {
 interpolation = {
     "method_name": "INTERPOLATION",
     "n": 2,
-    "lambdas": [0.95, 0.5]  # (unigram, bigram) for example 0.793
+    "lambdas": [0.95, 0.05]  # (unigram, bigram) for example 0.793
 }
 
 # 6) KNESER-NEY
@@ -46,7 +47,7 @@ kneser_ney = {
 error_correction = {
     "internal_ngram_best_config": {
         "method_name": "STUPID_BACKOFF",
-        "n": 9,   
+        "n": 5,   
         "alpha": 0.4# 3 => trigram
         # "discount": 0.70  # Kneser-Ney discount
           # (unigram, bigram) for example
@@ -55,7 +56,7 @@ error_correction = {
         
     },
     "candidate_max_distance": 3,  # max edit distance for isolated candidates
-    "alpha": 0.10,                 # weight for normalized edit distance
+    "alpha": 5.0,                 # weight for normalized edit distance
     "beta": 1.0                   # weight for negative log n-gram probability
 }
 
